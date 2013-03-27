@@ -75,7 +75,7 @@ connection
 
 在nginx中connection就是对tcp连接的封装，其中包括连接的socket，读事件，写事件。利用nginx封装的connection，我们可以很方便的使用nginx来处理与连接相关的事情，比如，建立连接，发送与接受数据等。而nginx中的http请求的处理就是建立在connection之上的，所以nginx不仅可以作为一个web服务器，也可以作为邮件服务器。当然，利用nginx提供的connection，我们可以与任何后端服务打交道。
 
-结合一个tcp连接的生命周期，我们看看nginx是如何处理一个连接的。首先，nginx在启动时，会解析配置文件，得到需要监听的端口与ip地址，然后在nginx的master进程里面，先初始化好这个监控的socket(创建socket，设置addrreuse等选项，绑定到指定的ip地址端口，再listen)，然后再fork出多个子进程出来，然后子进程会竞争accept新的连接。此时，客户端就可以向nginx发起连接了。当客户端与nginx进行三次握手，与nginx建立好一个连接后，此时，某一个子进程会accept成功，得到这个建立好的连接的socket，然后创建nginx对连接的封装，即ngx_connection_t结构体。接着，设置读写事件处理函数并添加读写事件来与客户端进行数据的交换。最后，nginx或客户端来主动关掉连接，到此，一个连接就寿终正寝了。
+结合一个tcp连接的生命周期，我们看看nginx是如何处理一个连接的。首先，nginx在启动时，会解析配置文件，得到需要监听的端口与ip地址，然后在nginx的master进程里面，先初始化好这个监控的socket(创建socket，设置addrreuse等选项，绑定到指定的ip地址端口，再listen)，然后再fork出多个子进程出来，然后子进程会竞争accept新的连接。此时，客户端就可以向nginx发起连接了。当客户端与服务端通过三次握手建立好一个连接后，nginx的某一个子进程会accept成功，得到这个建立好的连接的socket，然后创建nginx对连接的封装，即ngx_connection_t结构体。接着，设置读写事件处理函数并添加读写事件来与客户端进行数据的交换。最后，nginx或客户端来主动关掉连接，到此，一个连接就寿终正寝了。
 
 当然，nginx也是可以作为客户端来请求其它server的数据的（如upstream模块），此时，与其它server创建的连接，也封装在ngx_connection_t中。作为客户端，nginx先获取一个ngx_connection_t结构体，然后创建socket，并设置socket的属性（ 比如非阻塞）。然后再通过添加读写事件，调用connect/read/write来调用连接，最后关掉连接，并释放ngx_connection_t。
 
@@ -125,7 +125,7 @@ http请求是典型的请求-响应类型的的网络协议，而http是文件�
 
 在解析完请求行后，nginx会设置读事件的handler为ngx_http_process_request_headers，然后后续的请求就在ngx_http_process_request_headers中进行读取与解析。ngx_http_process_request_headers函数用来读取请求头，跟请求行一样，还是调用ngx_http_read_request_header来读取请求头，调用ngx_http_parse_header_line来解析一行请求头，解析到的请求头会保存到ngx_http_request_t的域headers_in中，headers_in是一个链表结构，保存所有的请求头。而HTTP中有些请求是需要特别处理的，这些请求头与请求处理函数存放在一个映射表里面，即ngx_http_headers_in，在初始化时，会生成一个hash表，当每解析到一个请求头后，就会先在这个hash表中查找，如果有找到，则调用相应的处理函数来处理这个请求头。比如:Host头的处理函数是ngx_http_process_host。
 
-当nginx解析到两个回车换行符时，就表示请求头的结束，此时就会调用ngx_http_process_request来处理请求了。ngx_http_process_request会设置当前的连接的读写事件处理函数为ngx_http_request_handler，然后再调用ngx_http_handler来真正开始处理一个完整的http请求。这里可能比较奇怪，读写事件处理函数都是ngx_http_request_handler，其实在这个函数中，会根据当前事件是读事件还是写事件，分别调用ngx_http_request_t中的read_event_handler或者是write_event_handler。由于此时，我们的请求头已经读取完成了，之前有说过，nginx的做法是先不读取请求body，所以这里面我们设置read_event_handler为ngx_http_block_reading，即不读取数据了。刚才说到，真正开始处理数据，是在ngx_http_handler这个函数里面，这个函数会设置write_event_handler为ngx_http_core_run_phases，并执行ngx_http_core_run_phases函数。ngx_http_core_run_phases这个函数将执行多阶段请求处理，nginx将一个http请求的处理分为多个阶段，那么这个函数就是执行这些阶段来产生数据。因为ngx_http_core_run_phases最后会产生数据，所以我们就很容易理解，为什么设置写事件的处理函数为ngx_http_core_run_phases了。在这里，我简要说明了一下函数的调用逻辑，我们需要明白最终是调用ngx_http_core_run_phases来处理请求，产生的响应头会放在ngx_http_request_t的headers_out中，这一部分内容，我会放在请求处理流程里面去讲。nginx的各种阶段会对请求进行处理，最后会调用filter来过滤数据，对数据进行加工，如truncked传输、gzip压缩等。这里的filter包括header filter与body filter，即对响应头或响应体进行处理。filter是一个链表结构，分别有header filter与body filter，先执行header filter中的所有filter，然后再执行body filter中的所有filter。在header filter中的最后一个filter，即ngx_http_header_filter，这个filter将会遍历所的有响应头，最后需要输出的响应头在一个连续的内存，然后调用ngx_http_write_filter进行输出。ngx_http_write_filter是body filter中的最后一个，所以nginx首先的body信息，在经过一系列的body filter之后，最后也会调用ngx_http_write_filter来进行输出(有图来说明)。
+当nginx解析到两个回车换行符时，就表示请求头的结束，此时就会调用ngx_http_process_request来处理请求了。ngx_http_process_request会设置当前的连接的读写事件处理函数为ngx_http_request_handler，然后再调用ngx_http_handler来真正开始处理一个完整的http请求。这里可能比较奇怪，读写事件处理函数都是ngx_http_request_handler，其实在这个函数中，会根据当前事件是读事件还是写事件，分别调用ngx_http_request_t中的read_event_handler或者是write_event_handler。由于此时，我们的请求头已经读取完成了，之前有说过，nginx的做法是先不读取请求body，所以这里面我们设置read_event_handler为ngx_http_block_reading，即不读取数据了。刚才说到，真正开始处理数据，是在ngx_http_handler这个函数里面，这个函数会设置write_event_handler为ngx_http_core_run_phases，并执行ngx_http_core_run_phases函数。ngx_http_core_run_phases这个函数将执行多阶段请求处理，nginx将一个http请求的处理分为多个阶段，那么这个函数就是执行这些阶段来产生数据。因为ngx_http_core_run_phases最后会产生数据，所以我们就很容易理解，为什么设置写事件的处理函数为ngx_http_core_run_phases了。在这里，我简要说明了一下函数的调用逻辑，我们需要明白最终是调用ngx_http_core_run_phases来处理请求，产生的响应头会放在ngx_http_request_t的headers_out中，这一部分内容，我会放在请求处理流程里面去讲。nginx的各种阶段会对请求进行处理，最后会调用filter来过滤数据，对数据进行加工，如truncked传输、gzip压缩等。这里的filter包括header filter与body filter，即对响应头或响应体进行处理。filter是一个链表结构，分别有header filter与body filter，先执行header filter中的所有filter，然后再执行body filter中的所有filter。在header filter中的最后一个filter，即ngx_http_header_filter，这个filter将会遍历所有的响应头，最后需要输出的响应头在一个连续的内存，然后调用ngx_http_write_filter进行输出。ngx_http_write_filter是body filter中的最后一个，所以nginx首先的body信息，在经过一系列的body filter之后，最后也会调用ngx_http_write_filter来进行输出(有图来说明)。
 
 这里要注意的是，nginx会将整个请求头都放在一个buffer里面，这个buffer的大小通过配置项client_header_buffer_size来设置，如果用户的请求头太大，这个buffer装不下，那nginx就会重新分配一个新的更大的buffer来装请求头，这个大buffer可以通过large_client_header_buffers来设置，这个large_buffer这一组buffer，比如配置4 8k，就是表示有四个8k大小的buffer可以用。注意，为了保存请求行或请求头的完整性，一个完整的请求行或请求头，需要放在一个连续的内存里面，所以，一个完整的请求行或请求头，只会保存在一个buffer里面。这样，如果请求行大于一个buffer的大小，就会返回414错误，如果一个请求头大小大于一个buffer大小，就会返回400错误。在了解了这些参数的值，以及nginx实际的做法之后，在应用场景，我们就需要根据实际的需求来调整这些参数，来优化我们的程序了。
 
@@ -181,7 +181,7 @@ ngx_str_t(100%)
 
 从结构体当中，data指向字符串数据的第一个字符，字符串的结束用长度来表示，而不是由'\0'来表示结束。所以，在写nginx代码时，处理字符串的方法跟我们平时使用有很大的不一样，但要时刻记住，字符串不以'\0'结束，尽量使用nginx提供的字符串操作的api来操作字符串。
 那么，nginx这样做有什么好处呢？首先，通过长度来表示字符串长度，减少计算字符串长度的次数。其次，nginx可以重复引用一段字符串内存，data可以指向任意内存，长度表示结束，而不用去copy一份自己的字符串(因为如果要以\0结束，而不能更改原字符串，所以势必要copy一段字符串)。我们在ngx_http_request_t结构体的成员中，可以找到很多字符串引用一段内存的例子，比如request_line、uri、args等等，这些字符串的data部分，都是指向在接收数据时创建buffer所指向的内存中，uri，args就没有必要copy一份出来。这样的话，减少了很多不必要的内存分配与拷贝。
-正是由于有这样的特性，当你在修改一个字符串时，你就得注意，你修改的字符串是否可以被修改，如果修改后，是否会对其它引用产生影响。在后面介绍ngx_unescape_uri函数的时候，就会看到这一点。然后，使用nginx的字符串会产生一些问题，glibc提供的很多系统api函数大多是通过'\0'来表示字符串的结束，所以我们在调用系统api时，就不能直接传入str->data了。此时，通常的做法是创建一段str->len + 1大小的内存，然后copy字符串，最后一个字节置为'\0'。比较hack的做法是，将字符串最后一个字符的后一个字符backup一个，然后设置为'\0'，在做完调用后，再由backup改回来，但前提条件是，你得确定这个字符是可以修改的，而且是有内存分配，不会越界，但一般不建议这么做。
+正是基于此特性，在nginx中，必须谨慎的去修改一个字符串。在修改字符串时需要认真的去考虑：是否可以修改该字符串；字符串修改后，是否会对其它的引用造成影响。在后面介绍ngx_unescape_uri函数的时候，就会看到这一点。但是，使用nginx的字符串会产生一些问题，glibc提供的很多系统api函数大多是通过'\0'来表示字符串的结束，所以我们在调用系统api时，就不能直接传入str->data了。此时，通常的做法是创建一段str->len + 1大小的内存，然后copy字符串，最后一个字节置为'\0'。比较hack的做法是，将字符串最后一个字符的后一个字符backup一个，然后设置为'\0'，在做完调用后，再由backup改回来，但前提条件是，你得确定这个字符是可以修改的，而且是有内存分配，不会越界，但一般不建议这么做。
 接下来，看看nginx提供的操作字符串相关的api。
 
 
@@ -189,7 +189,7 @@ ngx_str_t(100%)
 
     ngx_string(str)
 
-初始化一个字符串为str，str必须为常量字符串，  一般只用于声明字符串变量时顺便初始化变量的值。
+通过一个以'\0'结尾的普通字符串str构造一个nginx的字符串。鉴于api中采用sizeof操作符计算字符串长度，因此该api的参数必须是一个常量字符串。
 
 .. code:: c
 
@@ -199,13 +199,13 @@ ngx_str_t(100%)
 
 .. code:: c
 
-    ngx_str_set(str, text)
+    ngx_str_set(&str, text)
 
 设置字符串str为text，text必须为常量字符串。
 
 .. code:: c
 
-    ngx_str_null(str) 
+    ngx_str_null(&str) 
 
 设置字符串str为空串，长度为0，data为NULL。
 
@@ -216,7 +216,7 @@ ngx_str_t(100%)
     ngx_str_t str = ngx_string("hello world");
     ngx_str_t str1 = ngx_null_string();
 
-如果这样使用，就会有问题：
+如果这样使用，就会有问题，这里涉及到c语言中对结构体变量赋值操作的语法规则，在此不做介绍。
 
 
 .. code:: c
@@ -230,8 +230,8 @@ ngx_str_t(100%)
 .. code:: c
 
     ngx_str_t str, str1;
-    ngx_str_set(str, "hello world");    
-    ngx_str_null(str);
+    ngx_str_set(&str, "hello world");    
+    ngx_str_null(&str1);
 
 不过要注意的是，ngx_string与ngx_str_set在调用时，传进去的字符串一定是常量字符串，否则会得到意想不到的错误。如： 
 
@@ -239,7 +239,7 @@ ngx_str_t(100%)
 
    ngx_str_t str;
    u_char *a = "hello world";
-   ngx_str_set(str, a);    // 问题产生
+   ngx_str_set(&str, a);    // 问题产生
 
 
 .. code:: c
@@ -376,7 +376,7 @@ ngx_pool_t是一个非常重要的数据结构，在很多重要的场合都有�
 
 从上面举的两个例子中我们可以看出，使用ngx_pool_t这个数据结构的时候，所有的资源的释放都在这个对象被销毁的时刻，统一进行了释放，那么就会带来一个问题，就是这些资源的生存周期（或者说被占用的时间）是跟ngx_pool_t的生存周期基本一致（ngx_pool_t也提供了少量操作可以提前释放资源）。从最高效的角度来说，这并不是最好的。比如，我们需要依次使用A，B，C三个资源，且使用完B的时候，A就不会再被使用了，使用C的时候A和B都不会被使用到。如果不使用ngx_pool_t来管理这三个资源，那我们可能从系统里面申请A，使用A，然后在释放A。接着申请B，使用B，再释放B。最后申请C，使用C，然后释放C。但是当我们使用一个ngx_pool_t对象来管理这三个资源的时候，A，B和C的是否是在最后一起发生的，也就是在使用完C以后。诚然，这在客观上增加了程序在一段时间的资源使用量。但是这也减轻了程序员分别管理三个资源的生命周期的工作。这也就是有所得，必有所失的道理。实际上是一个取舍的问题，在具体的情况下，你更在乎的是哪个。
 
-可以看一下在nginx里面一个典型的使用ngx_pool_t的场景，对于nginx处理的每个http request, nginx会生成一个ngx_pool_t对象与这个http requst关联，所有处理过程中需要申请的资源都从这个ngx_pool_t对象中获取，当这个http requst处理完成以后，所有在处理过程中申请的资源，都讲随着这个关联的ngx_pool_t对象的销毁而释放。
+可以看一下在nginx里面一个典型的使用ngx_pool_t的场景，对于nginx处理的每个http request, nginx会生成一个ngx_pool_t对象与这个http request关联，所有处理过程中需要申请的资源都从这个ngx_pool_t对象中获取，当这个http request处理完成以后，所有在处理过程中申请的资源，都讲随着这个关联的ngx_pool_t对象的销毁而释放。
 
 ngx_pool_t相关结构及操作被定义在文件src/core/ngx_palloc.h|c中。
 
@@ -550,7 +550,7 @@ ngx_array_t是nginx内部使用的数组结构。nginx的数组结构在存储�
 
     void ngx_array_destroy(ngx_array_t *a);
 
-销毁该数组对象，并释放其对应的内存给对应的内存池。需要注意的是，调用该函数以后，数组对象上个字段的值并没有被清零。所以即便这个时候对象a上各字段还有有意义的值，但是这个对象绝对不应该被再使用了，除非是使用ngx_array_init函数。 
+销毁该数组对象，并释放其分配的内存回内存池。
 
 
 .. code:: c 
@@ -676,7 +676,7 @@ nginx为了处理带有通配符的域名的匹配问题，实现了ngx_hash_wil
 
 该函数迎来构建一个可以包含通配符key的hash表。
 
-:hint: 构造一个通配符hash表的一些参数的一个集合。关于该参数对应的类型的说明，请参见ngx_hash_t类型中ngx_hash_init函数的说明。
+:hinit: 构造一个通配符hash表的一些参数的一个集合。关于该参数对应的类型的说明，请参见ngx_hash_t类型中ngx_hash_init函数的说明。
 
 :names: 构造此hash表的所有的通配符key的数组。特别要注意的是这里的key已经都是被预处理过的。例如：“\*.abc.com”或者“.abc.com”被预处理完成以后，变成了“com.abc.”。而“mail.xxx.\*”则被预处理为“mail.xxx.”。为什么会被处理这样？这里不得不简单地描述一下通配符hash表的实现原理。当构造此类型的hash表的时候，实际上是构造了一个hash表的一个“链表”，是通过hash表中的key“链接”起来的。比如：对于“\*.abc.com”将会构造出2个hash表，第一个hash表中有一个key为com的表项，该表项的value包含有指向第二个hash表的指针，而第二个hash表中有一个表项abc，该表项的value包含有指向\*.abc.com对应的value的指针。那么查询的时候，比如查询www.abc.com的时候，先查com，通过查com可以找到第二级的hash表，在第二级hash表中，再查找abc，依次类推，直到在某一级的hash表中查到的表项对应的value对应一个真正的值而非一个指向下一级hash表的指针的时候，查询过程结束。**这里有一点需要特别注意的，就是names数组中元素的value所对应的值（也就是真正的value所在的地址）必须是能被4整除的，或者说是在4的倍数的地址上是对齐的。因为这个value的值的低两位bit是有用的，所以必须为0。如果不满足这个条件，这个hash表查询不出正确结果。**
 
@@ -933,7 +933,7 @@ ngx_buf_t(99%)
 
 :tag: 实际上是一个void\*类型的指针，使用者可以关联任意的对象上去，只要对使用者有意义。
 
-:file: 当buf所包含的内容在文件中是，file字段指向对应的文件对象。
+:file: 当buf所包含的内容在文件中时，file字段指向对应的文件对象。
 
 :shadow: 当这个buf完整copy了另外一个buf的所有字段的时候，那么这两个buf指向的实际上是同一块内存，或者是同一个文件的同一部分，此时这两个buf的shadow字段都是指向对方的。那么对于这样的两个buf，在释放的时候，就需要使用者特别小心，具体是由哪里释放，要提前考虑好，如果造成资源的多次释放，可能会造成程序崩溃！
 
@@ -1115,7 +1115,7 @@ ngx_list_t顾名思义，看起来好像是一个list的数据结构。这样的
 
 
 
-nginx的配置系统
+nginx的配置系统(100%)
 ------------------------
 
 nginx的配置系统由一个主配置文件和其他一些辅助的配置文件构成。这些配置文件均是纯文本文件，全部位于nginx安装目录下的conf目录下。
@@ -1269,30 +1269,124 @@ nginx.conf中的配置信息，根据其逻辑上的意义，对它们进行了�
 
 当然，这里只是一些示例。具体有哪些配置指令，以及这些配置指令可以出现在什么样的上下文中，需要参考nginx的使用文档。
 
+nginx的模块化体系结构
+---------------------------------
+
+nginx的内部结构是由核心部分和一系列的功能模块所组成。这样划分是为了使得每个模块的功能相对简单，便于开发，同时也便于对系统进行功能扩展。为了便于描述，下文中我们将使用nginx core来称呼nginx的核心功能部分。
+
+nginx core提供了web服务器的基础功能，同时提供了web服务反向代理，email服务反向代理功能。nginx core实现了底层的通讯协议，为其他模块和nginx进程构建了基本的运行时环境，并且构建了其他各模块的协作基础。除此之外，或者说大部分与协议相关的，或者应用相关的功能都是在这些模块中所实现的。
+
+
+模块概述
+------------------
+
+nginx将各功能模块组织成一条链，当有请求到达的时候，请求依次经过这条链上的部分或者全部模块，进行处理。每个模块实现特定的功能。例如，实现对请求解压缩的模块，实现SSI的模块，实现与上游服务器进行通讯的模块，实现与FastCGI服务进行通讯的模块。
+
+有两个模块比较特殊，他们居于nginx core和各功能模块的中间。这两个模块就是http模块和mail模块。这2个模块在nginx core之上实现了另外一层抽象，处理与HTTP协议和email相关协议（SMTP/POP3/IMAP）有关的事件，并且确保这些事件能被以正确的顺序调用其他的一些功能模块。
+
+目前HTTP协议是被实现在http模块中的，但是有可能将来被剥离到一个单独的模块中，以扩展nginx支持SPDY协议。
+
+模块的分类
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+nginx的模块根据其功能基本上可以分为以下几种类型：
+
+:event module: 搭建了独立于操作系统的事件处理机制的框架，及提供了各具体事件的处理。包括ngx_events_module， ngx_event_core_module和ngx_epoll_module等。nginx具体使用何种事件处理模块，这依赖于具体的操作系统和编译选项。
+
+:phase handler: 此类型的模块也被直接称为handler模块。主要负责处理客户端请求并产生待响应内容，比如ngx_http_static_module模块，负责客户端的静态页面请求处理并将对应的磁盘文件准备为响应内容输出。
+
+:output filter: 也称为filter模块，主要是负责对输出的内容进行处理，可以对输出进行修改。例如，可以实现对输出的所有html也面增加预定义的footbar一类的工作，或者对输出的图片的URL进行替换之类的工作。
+
+:upstream: upstream模块实现反向代理的功能，将真正的请求转发到后端服务器上，并从后端服务器上读取响应，发回客户端。upstream模块是一种特殊的handler，只不过响应内容不是真正有自己产生的，而是从后端服务器上读取的。
+
+:load-balancer: 负载均衡模块，实现特定的算法，在众多的后端服务器中，选择一个服务器出来作为某个请求的转发服务器。
+
+
+
 
 
 nginx的请求处理
 ------------------------
+
+nginx使用一个多进程模型来对外提供服务，其中一个master进程，多个worker进程。master进程负责管理nginx本身和其他worker进程。
+
+所有实际上的业务处理逻辑都在worker进程。worker进程中有一个函数，执行无限循环，不断处理收到的来自客户端的请求，并进行处理，直到整个nginx服务被停止。
+
+worker进程中，ngx_worker_process_cycle()函数就是这个无限循环的处理函数。在这个函数中，一个请求的简单处理流程如下：
+
+#) 操作系统提供的机制（例如epoll, kqueue等）产生相关的事件。
+#) 接收和处理这些事件，如是接受到数据，则产生更高层的request对象。
+#) 处理request的header和body。
+#) 产生响应，并发送回客户端。
+#) 完成request的处理。
+#) 重新初始化定时器及其他事件。
 
 
 
 请求的处理流程
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+为了让大家更好的了解nginx中请求处理过程，我们以HTTP Request为例，来做一下详细地说明。
+
+从nginx的内部来看，一个HTTP Request的处理过程设计到一下几个阶段。
+
+#) 初始化HTTP Request（读取来自客户端的数据，生成HTTP Requst对象，该对象含有该请求所有的信息）。
+#) 处理请求头。
+#) 处理请求体。
+#) 如果有的话，调用与此请求（URL或者Location）关联的handler
+#) 依次调用各phase handler进行处理。
+
+在这里，我们需要了解一下phase handler这个概念。phase字面的意思，就是阶段。所以phase handlers也就好理解了，就是包含若干个处理阶段的一些handler。
+
+在每一个阶段，包含有若干个handler，再处理到某个阶段的时候，依次调用该阶段的handler对HTTP Request进行处理。
+
+通常情况下，一个phase handler对这个request进行处理，并产生一些输出。通常phase handler是与定义在配置文件中的某个location相关联的。
+
+一个phase handler通常执行以下几项任务：
+
+#) 获取location配置。
+#) 产生适当的响应。
+#) 发送response header.
+#) 发送response body.
 
 
-nginx的模块化体系结构
----------------------------------
+当nginx读取到一个HTTP Request的header的时候，nginx首先查找与这个请求关联的虚拟主机的配置。如果找到了这个虚拟主机的配置，那么通常情况下，这个HTTP Request将会经过以下几个阶段的处理（phase handlers）：
+
+:NGX_HTTP_POST_READ_PHASE:	读取请求内容阶段
+:NGX_HTTP_SERVER_REWRITE_PHASE:	Server请求地址重写阶段
+:NGX_HTTP_FIND_CONFIG_PHASE:	配置查找阶段:
+:NGX_HTTP_REWRITE_PHASE:	Location请求地址重写阶段
+:NGX_HTTP_POST_REWRITE_PHASE:	请求地址重写提交阶段
+:NGX_HTTP_PREACCESS_PHASE:	访问权限检查准备阶段
+:NGX_HTTP_ACCESS_PHASE:	访问权限检查阶段
+:NGX_HTTP_POST_ACCESS_PHASE:	访问权限检查提交阶段
+:NGX_HTTP_TRY_FILES_PHASE:	配置项try_files处理阶段  
+:NGX_HTTP_CONTENT_PHASE:	内容产生阶段
+:NGX_HTTP_LOG_PHASE:	日志模块处理阶段
 
 
+在内容产生阶段，为了给一个request产生正确的响应，nginx必须把这个request交给一个合适的content handler去处理。如果这个request对应的location在配置文件中被明确指定了一个content handler，那么nginx就可以通过对location的匹配，直接找到这个对应的handler，并把这个request交给这个content handler去处理。这样的配置指令包括像，perl，flv，proxy_pass，mp4等。
 
-模块概述
-------------------
+如果一个request对应的location并没有直接有配置的content handler，那么nginx依次尝试:
+
+#) 如果一个location里面有配置  random_index  on，那么随机选择一个文件，发送给客户端。
+#) 如果一个location里面有配置 index指令，那么发送index指令指名的文件，给客户端。
+#) 如果一个location里面有配置 autoindex  on，那么就发送请求地址对应的服务端路径下的文件列表给客户端。
+#) 如果这个request对应的location上有设置gzip_static on，那么就查找是否有对应的.gz文件存在，有的话，就发送这个给客户端（客户端支持gzip的情况下）。
+#) 请求的URI如果对应一个静态文件，static module就发送静态文件的内容到客户端。
+
+内容产生阶段完成以后，生成的输出会被传递到filter模块去进行处理。filter模块也是与location相关的。所有的fiter模块都被组织成一条链。输出会依次穿越所有的filter，直到有一个filter模块的返回值表明已经处理完成。
+
+这里列举几个常见的filter模块，例如：
+#) server-side includes。
+#) XSLT filtering。
+#) 图像缩放之类的。
+#) gzip压缩。
 
 
+在所有的filter中，有几个filter模块需要关注一下。按照调用的顺序依次说明如下：
 
-模块的分类
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-
+:write: 写输出到客户端，实际上是写到连接对应的socket上。
+:postpone: 这个filter是负责subrequest的，也就是子请求的。
+:copy: 将一些需要复制的buf(文件或者内存)重新复制一份然后交给剩余的body filter处理。
 
